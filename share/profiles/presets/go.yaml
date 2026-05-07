@@ -1,0 +1,11 @@
+chinese:
+  GOPROXY: "https://goproxy.cn,direct"
+  GOSUMDB: "sum.golang.google.cn"
+  summary: "GOPROXY=goproxy.cn"
+  probe: "https://goproxy.cn"
+
+official:
+  GOPROXY: "https://proxy.golang.org,direct"
+  GOSUMDB: "sum.golang.org"
+  summary: "Official proxy.golang.org"
+  probe: "https://proxy.golang.org"

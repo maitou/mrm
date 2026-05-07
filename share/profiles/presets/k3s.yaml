@@ -1,0 +1,9 @@
+chinese:
+  template: "k3s-registries.cn.yaml"
+  summary: "containerd multi-mirror registry config (CN endpoints)"
+  probe: "https://docker.m.daocloud.io"
+
+official:
+  remove_file: true
+  summary: "Remove registries.yaml matching built-in cn template"
+  probe: ""

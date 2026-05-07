@@ -1,0 +1,14 @@
+# scope_id -> preset_id (built-in chinese-group / official-group)
+chinese-group:
+  apt: chinese
+  git: chinese
+  docker: chinese
+  k3s: chinese
+  go: chinese
+
+official-group:
+  apt: official
+  git: official
+  docker: official
+  k3s: official
+  go: official

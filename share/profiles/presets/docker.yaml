@@ -1,0 +1,13 @@
+chinese:
+  registry_mirrors:
+    - "https://docker.m.daocloud.io"
+    - "https://docker.1ms.run"
+    - "https://hub-mirror.c.163.com"
+    - "https://docker.xuanyuan.me"
+  summary: "Merge CN Docker Hub mirror endpoints"
+  probe: "https://docker.m.daocloud.io"
+
+official:
+  registry_mirrors: []
+  summary: "Remove registry-mirrors entries written by mrm"
+  probe: "https://hub.docker.com"

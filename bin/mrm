@@ -1,0 +1,662 @@
+#!/usr/bin/env bash
+# Mirror Registry Manager — Phase A + B (yrm-style ls / test)
+set -euo pipefail
+
+# True only when this file is sourced into the user's shell (not when executed).
+# Must be set here: inside lib/scopes/*.sh functions, BASH_SOURCE[0] is the scope file.
+MRM_INVOKED_VIA_SOURCE=0
+if [[ -n "${BASH_VERSION:-}" ]]; then
+  [[ "${BASH_SOURCE[0]:-}" != "${0:-}" ]] && MRM_INVOKED_VIA_SOURCE=1
+fi
+export MRM_INVOKED_VIA_SOURCE
+
+# Dev layout: <repo>/mrm/bin/mrm -> MRM_PREFIX=<repo>/mrm (includes lib/, share/)
+# install.sh layout: PREFIX/bin/mrm -> MRM_PREFIX=PREFIX/share/mrm (install copies lib/, share/)
+mrm_resolve_prefix() {
+  local bindir root_here
+  bindir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+  root_here=$(cd "${bindir}/.." && pwd -P)
+  if [[ -f "${root_here}/lib/common.sh" ]]; then
+    printf '%s\n' "$root_here"
+    return 0
+  fi
+  if [[ -f "${bindir}/../share/mrm/lib/common.sh" ]]; then
+    cd "${bindir}/../share/mrm" && pwd -P
+    return 0
+  fi
+  echo "mrm: cannot find lib/common.sh." >&2
+  echo "mrm: if you used install.sh, re-run from the source tree: bash mrm/install.sh (installs PREFIX/share/mrm/lib and share/)." >&2
+  echo "mrm: tried: ${root_here}/lib/common.sh and ${bindir}/../share/mrm/lib/common.sh" >&2
+  return 1
+}
+MRM_PREFIX=$(mrm_resolve_prefix) || exit 1
+export MRM_PREFIX
+
+# shellcheck source=../lib/common.sh
+source "${MRM_PREFIX}/lib/common.sh"
+# shellcheck source=../lib/registry.sh
+source "${MRM_PREFIX}/lib/registry.sh"
+
+mrm_help() {
+  cat <<'EOF'
+mrm - Mirror Registry Manager (mirrors, groups, scopes/presets)
+
+Usage:
+  mrm --help
+  mrm --list-scopes
+  mrm [OPTION]... COMMAND [ARG]...
+
+  COMMAND is one of ls, use, current, test, shell-env; or the first argument may be --help or
+  --list-scopes.
+
+  List built-in groups and presets per scope, apply a group or a single scope/preset,
+  show inferred state, or run preset probes. See `mrm --list-scopes` for registered
+  scopes.
+
+Options:
+      --help               Print this help and exit 0; long option only (no -h).
+      --list-scopes        Table: SCOPE, REQUIRES_ROOT (yes/no), TITLE, DESCRIPTION
+                             (one row per scope, left-aligned columns); must be the
+                             first argument.
+      --scopes=LIST        Comma-separated scope ids (trimmed). Omitted means all
+                             registered scopes. With `mrm use SCOPE/PRESET`, LIST
+                             must include that SCOPE if set. May appear anywhere in
+                             argv.
+      --verbose, -v        With `ls`, print each preset's configuration (YAML without
+                             summary/probe) and expand k3s template files when present.
+      --export-shell-env   With `use` only: after a successful apply, print shell exports
+                             (same as `mrm shell-env`) on stdout and send the status table to stderr,
+                             so one line updates this session, e.g.:
+                             eval "$(mrm use go/chinese --export-shell-env)"
+
+Commands:
+  ls                     List built-in groups (chinese-group, official-group) and each
+                           scope's presets (summary + probe). chinese-group: China-
+                           reachable aggregate; official-group: upstream defaults.
+                           Use --verbose / -v for full preset YAML and k3s mirror templates.
+  use TARGET             Apply TARGET: chinese-group, official-group, or SCOPE/PRESET
+                           (e.g. apt/chinese). Groups: share/profiles/groups.yaml.
+                           SCOPE/PRESET applies one preset in that scope. Some scopes
+                           need root for system paths (use sudo when prompted). On success,
+                           prints inferred state after success (same rows as `mrm current`; --scopes applies).
+                           For SCOPE/PRESET only that SCOPE row is printed (same as `mrm current SCOPE`).
+                           Add --export-shell-env to print only sh exports on stdout (see Options).
+  current [SCOPE]        Table: SCOPE, PRESET, DETAIL (inferred). Optional SCOPE limits to one
+                           registered scope id (e.g. docker). Not scope/preset (current is
+                           inferred only). With --scopes=, SCOPE must appear in the filter.
+  test [TARGET]          Probes the inferred active preset per scope unless TARGET includes
+                           a preset (SCOPE/PRESET). No TARGET: each active scope's current
+                           preset only. TARGET is a group: each scope in the group, current
+                           preset only. TARGET is a scope id: that scope's current preset only.
+                           When the tested preset matches inferred state for a scope, that scope runs a
+                           live check (apt: archive Release; git: ls-remote GitHub HTTPS; docker: docker pull;
+                           k3s: k3s crictl pull then ctr pull (Hub image); go: go list -m). Otherwise only the YAML .probe URL is checked (HTTP).
+                           Needs curl; docker needs docker CLI; k3s needs k3s on PATH; go needs go.
+                           docker scope needs docker CLI. Exit 1 if any non-official probe fails.
+  shell-env              Print sh exports for the current inferred shell-backed scopes
+                           (e.g. go GOPROXY/GOSUMDB). This does not change your shell by itself;
+                           run eval "$(mrm shell-env --scopes=go)" (or use mrm use ... --export-shell-env).
+                           If you source the mrm script, exports can apply in that shell automatically.
+
+Rules:
+  First argument must be ls|use|current|test|shell-env, or --help, or --list-scopes.
+  Inspect with `mrm current`; switch groups with `mrm use chinese-group` or
+  `mrm use official-group`.
+
+Dependencies:
+  yq for YAML; jq for the docker scope; curl for test. Use sudo mrm ... when apt,
+  docker, k3s, etc. need privileges for system paths.
+EOF
+}
+
+mrm_source_scope() {
+  local id=$1
+  # shellcheck source=/dev/null
+  source "${MRM_PREFIX}/lib/scopes/${id}.sh"
+}
+
+mrm_scope_requires_root() {
+  local id=$1
+  mrm_source_scope "$id"
+  "mrm_scope_${id}_requires_root" 2>/dev/null | tail -1 | tr -d '[:space:]'
+}
+
+mrm_parse_kv_state() {
+  # stdin: lines state= / preset= / detail=  -> sets shell vars
+  state= preset= detail=
+  local line k v
+  while IFS= read -r line; do
+    k=${line%%=*}
+    v=${line#*=}
+    case "$k" in
+      state) state=$v ;;
+      preset) preset=$v ;;
+      detail) detail=$v ;;
+    esac
+  done
+}
+
+mrm_active_scopes_fill() {
+  # Registry order; if scopes_csv is set, filter and validate
+  local scopes_csv=$1
+  MRM_ACTIVE_SCOPES=()
+  local -A want=()
+  if [[ -n "${scopes_csv// /}" ]]; then
+    local part
+    while IFS= read -r part; do
+      [[ -z "$part" ]] && continue
+      want["$part"]=1
+    done < <(echo "$scopes_csv" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local id ok
+    for id in "${!want[@]}"; do
+      ok=0
+      local rid
+      while IFS= read -r rid; do
+        [[ "$rid" == "$id" ]] && ok=1
+      done < <(mrm_registry_list)
+      if [[ "$ok" -ne 1 ]]; then
+        echo "mrm: unknown scope: ${id}" >&2
+        echo "mrm: registered: $(mrm_registry_list | paste -sd, -)" >&2
+        exit 1
+      fi
+    done
+  fi
+  local sid
+  while IFS= read -r sid; do
+    if [[ ${#want[@]} -eq 0 ]]; then
+      MRM_ACTIVE_SCOPES+=("$sid")
+    elif [[ -n "${want[$sid]:-}" ]]; then
+      MRM_ACTIVE_SCOPES+=("$sid")
+    fi
+  done < <(mrm_registry_list)
+}
+
+mrm_list_scopes_cmd() {
+  # One row per scope; fixed-width left-aligned columns for SCOPE, REQUIRES_ROOT, TITLE;
+  # DESCRIPTION is the last column (no fixed width).
+  local id rr title desc root_word
+  printf '%-10s %-15s %-42s %s\n' "SCOPE" "REQUIRES_ROOT" "TITLE" "DESCRIPTION"
+  printf '%-10s %-15s %-42s %s\n' \
+    "$(printf '%*s' 10 '' | tr ' ' '-')" \
+    "$(printf '%*s' 15 '' | tr ' ' '-')" \
+    "$(printf '%*s' 42 '' | tr ' ' '-')" \
+    "$(printf '%*s' 48 '' | tr ' ' '-')"
+  while IFS= read -r id; do
+    mrm_source_scope "$id"
+    rr=$("mrm_scope_${id}_requires_root" 2>/dev/null | tail -1 | tr -d '[:space:]')
+    title=""
+    desc=""
+    while IFS= read -r line; do
+      case "$line" in
+        title=*) title=${line#title=} ;;
+        description=*) desc=${line#description=} ;;
+      esac
+    done < <("mrm_scope_${id}_metadata" 2>/dev/null)
+    root_word="${rr:-?}"
+    [[ "$root_word" == "1" ]] && root_word=yes
+    [[ "$root_word" == "0" ]] && root_word=no
+    printf '%-10s %-15s %-42s %s\n' "$id" "$root_word" "${title:-?}" "${desc:-?}"
+  done < <(mrm_registry_list)
+}
+
+# Intersect two comma-separated scope lists; order follows primary.
+mrm_csv_intersect_scopes() {
+  local primary=$1 filter=$2
+  [[ -n "${filter// /}" ]] || {
+    echo "$primary"
+    return 0
+  }
+  [[ -n "${primary// /}" ]] || {
+    echo "$filter"
+    return 0
+  }
+  local -A want=()
+  local part out=()
+  while IFS= read -r part; do
+    part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -z "$part" ]] && continue
+    want["$part"]=1
+  done < <(echo "$filter" | tr ',' '\n')
+  while IFS= read -r part; do
+    part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -z "$part" ]] && continue
+    [[ -n "${want[$part]:-}" ]] && out+=("$part")
+  done < <(echo "$primary" | tr ',' '\n')
+  if [[ ${#out[@]} -eq 0 ]]; then
+    echo "mrm: current: no overlap between target scopes and --scopes filter" >&2
+    return 1
+  fi
+  (IFS=','; echo "${out[*]}")
+}
+
+mrm_current_cmd() {
+  local scopes_csv=$1 target=${2:-}
+  mrm_ensure_yq_on_path
+  mrm_require_yq || exit 1
+  local effective_csv=$scopes_csv
+  if [[ -n "${target:-}" ]]; then
+    if [[ "$target" == */* ]]; then
+      echo "mrm: current: TARGET must be a single scope id (not scope/preset). Example: mrm current docker" >&2
+      exit 1
+    fi
+    if mrm_group_exists "$target"; then
+      echo "mrm: current: groups are not supported; pass one scope id (e.g. mrm current docker) or use --scopes= for several." >&2
+      exit 1
+    fi
+    local found=0 rid
+    while IFS= read -r rid; do
+      [[ "$rid" == "$target" ]] && found=1
+    done < <(mrm_registry_list)
+    if [[ "$found" -eq 1 ]]; then
+      effective_csv="$target"
+    else
+      echo "mrm: current: unknown scope: ${target}" >&2
+      exit 1
+    fi
+    if [[ -n "${scopes_csv// /}" ]]; then
+      effective_csv=$(mrm_csv_intersect_scopes "$effective_csv" "$scopes_csv") || exit 1
+    fi
+    scopes_csv=$effective_csv
+  fi
+  mrm_active_scopes_fill "$scopes_csv"
+  printf '%-10s %-18s %s\n' "SCOPE" "PRESET" "DETAIL"
+  printf '%-10s %-18s %s\n' \
+    "$(printf '%*s' 10 '' | tr ' ' '-')" \
+    "$(printf '%*s' 18 '' | tr ' ' '-')" \
+    "$(printf '%*s' 48 '' | tr ' ' '-')"
+  local id
+  for id in "${MRM_ACTIVE_SCOPES[@]}"; do
+    mrm_source_scope "$id"
+    preset= detail=
+    while IFS= read -r line; do
+      k=${line%%=*}
+      v=${line#*=}
+      case "$k" in preset) preset=$v ;; detail) detail=$v ;; esac
+    done < <("mrm_scope_${id}_get_state" 2>/dev/null)
+    printf '%-10s %-18s %s\n' "$id" "${preset:--}" "${detail:--}"
+  done
+}
+
+mrm_use_exit_summary() {
+  local ok=$1 fail=$2 rootf=$3
+  if [[ "$fail" -eq 0 ]]; then
+    return 0
+  fi
+  echo "mrm: some scopes failed (successful ones were not rolled back). ok=${ok} fail=${fail}" >&2
+  if [[ "$ok" -gt 0 ]]; then
+    exit 3
+  fi
+  if [[ "$rootf" -gt 0 && "$fail" -eq "$rootf" ]]; then
+    exit 2
+  fi
+  exit 3
+}
+
+mrm_use_group() {
+  local group=$1 scopes_csv=$2
+  mrm_require_yq || exit 1
+  mrm_group_exists "$group" || {
+    echo "mrm: unknown group: ${group}" >&2
+    exit 1
+  }
+  mrm_active_scopes_fill "$scopes_csv"
+  local id rc ok=0 fail=0 rootf=0 preset
+  for id in "${MRM_ACTIVE_SCOPES[@]}"; do
+    rc=0
+    local rr
+    rr=$(mrm_scope_requires_root "$id")
+    if [[ "$rr" == "1" ]] && ! mrm_is_root; then
+      echo "mrm: [${id}] root required; use: sudo mrm use ..." >&2
+      fail=$((fail + 1))
+      rootf=$((rootf + 1))
+      continue
+    fi
+    mrm_source_scope "$id"
+    local bp cur
+    bp=$(mrm_group_preset "$group" "$id" || true)
+    if [[ -n "$bp" && "$bp" != "null" ]]; then
+      cur=$(mrm_get_current_preset "$id")
+      if [[ -n "$cur" && "$cur" == "$bp" ]]; then
+        echo "mrm: [${id}] already using ${group} (${bp}); skip" >&2
+        if [[ "$id" == "go" ]]; then
+          mrm_source_scope go
+          mrm_scope_go__hint_or_sync_after_apply
+        fi
+        ok=$((ok + 1))
+        continue
+      fi
+    fi
+    set +e
+    "mrm_scope_${id}_apply_group" "$group"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+      ok=$((ok + 1))
+      preset=$(mrm_group_preset "$group" "$id" || true)
+      [[ -n "$preset" && "$preset" != "null" ]] && mrm_state_touch_scope "$id" "$preset" "$group"
+    else
+      fail=$((fail + 1))
+      [[ "$rc" -eq 2 ]] && rootf=$((rootf + 1))
+      echo "mrm: [${id}] apply_group failed (exit ${rc})" >&2
+    fi
+  done
+  mrm_use_exit_summary "$ok" "$fail" "$rootf"
+}
+
+mrm_use_scope_preset() {
+  local target=$1 scopes_csv=$2
+  local scope=${target%%/*}
+  local preset=${target#*/}
+  if [[ "$scope" == "$target" ]] || [[ -z "$preset" ]]; then
+    echo "mrm: invalid target (expected scope/preset): ${target}" >&2
+    exit 1
+  fi
+  local ok=0
+  while IFS= read -r rid; do
+    [[ "$rid" == "$scope" ]] && ok=1
+  done < <(mrm_registry_list)
+  if [[ "$ok" -ne 1 ]]; then
+    echo "mrm: unknown scope: ${scope}" >&2
+    exit 1
+  fi
+  mrm_require_yq || exit 1
+  mrm_preset_has "$scope" "$preset" || {
+    echo "mrm: unknown preset: ${scope}/${preset}" >&2
+    exit 1
+  }
+  if [[ -n "${scopes_csv// /}" ]]; then
+    local found=0 part
+    while IFS= read -r part; do
+      [[ "$part" == "$scope" ]] && found=1
+    done < <(echo "$scopes_csv" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ "$found" -ne 1 ]]; then
+      echo "mrm: --scopes inconsistent with ${scope}/${preset} (must include ${scope})" >&2
+      exit 1
+    fi
+  fi
+  local rr
+  rr=$(mrm_scope_requires_root "$scope")
+  if [[ "$rr" == "1" ]] && ! mrm_is_root; then
+    echo "mrm: [${scope}] root required" >&2
+    exit 2
+  fi
+  mrm_source_scope "$scope"
+  local current
+  current=$(mrm_get_current_preset "$scope")
+  if [[ -n "$current" && "$current" == "$preset" ]]; then
+    echo "already using ${scope}/${preset}" >&2
+    if [[ "$scope" == "go" ]]; then
+      mrm_scope_go__hint_or_sync_after_apply
+    fi
+    return 0
+  fi
+  set +e
+  "mrm_scope_${scope}_apply_preset" "$preset"
+  local rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    echo "mrm: [${scope}] apply_preset failed (exit ${rc})" >&2
+    exit "$rc"
+  fi
+  mrm_state_touch_scope "$scope" "$preset" "${scope}/${preset}"
+}
+
+# After a successful mrm use. If narrow_scope is set (single scope id), same as `mrm current $narrow_scope`;
+# otherwise full table respecting --scopes CSV.
+mrm_use_print_current_after_success() {
+  local scopes_csv=$1 narrow_scope=${2:-}
+  echo ""
+  echo "Current (inferred):"
+  if [[ -n "$narrow_scope" ]]; then
+    mrm_current_cmd "$scopes_csv" "$narrow_scope"
+  else
+    mrm_current_cmd "$scopes_csv"
+  fi
+}
+
+# Print eval-able exports for scopes that support it (e.g. go: GOPROXY/GOSUMDB).
+mrm_shell_env_cmd() {
+  local scopes_csv=$1
+  mrm_require_yq || exit 1
+  mrm_active_scopes_fill "$scopes_csv"
+  local id
+  if [[ -t 1 ]] && [[ -t 2 ]]; then
+    echo "mrm(shell-env): printed lines are not executed automatically; your shell still has the old GOPROXY until you run:" >&2
+    echo '  eval "$(mrm shell-env --scopes=go)"' >&2
+    echo "" >&2
+  fi
+  for id in "${MRM_ACTIVE_SCOPES[@]}"; do
+    mrm_source_scope "$id"
+    if declare -F "mrm_scope_${id}_emit_shell_env" >/dev/null 2>&1; then
+      "mrm_scope_${id}_emit_shell_env"
+    fi
+  done
+}
+
+mrm_use_cmd() {
+  local target=$1 scopes_csv=$2 used_scope_preset=""
+  [[ -n "$target" ]] || {
+    echo "mrm: use requires a target: chinese-group | official-group | scope/preset" >&2
+    exit 1
+  }
+  if [[ "$target" == */* ]]; then
+    used_scope_preset="${target%%/*}"
+    mrm_use_scope_preset "$target" "$scopes_csv"
+  else
+    mrm_use_group "$target" "$scopes_csv"
+  fi
+  if [[ "${MRM_EXPORT_SHELL_ENV:-0}" == "1" ]]; then
+    unset MRM_SHELL_ENV_HINTS 2>/dev/null || true
+    mrm_use_print_current_after_success "$scopes_csv" "$used_scope_preset" >&2
+    local env_scopes=$scopes_csv
+    [[ -n "$used_scope_preset" ]] && env_scopes=$used_scope_preset
+    mrm_shell_env_cmd "$env_scopes"
+  else
+    mrm_use_print_current_after_success "$scopes_csv" "$used_scope_preset"
+    mrm_flush_shell_env_hints
+  fi
+}
+
+mrm_get_current_preset() {
+  local id=$1 k v p=""
+  mrm_source_scope "$id"
+  while IFS= read -r line; do
+    k=${line%%=*}
+    v=${line#*=}
+    [[ "$k" == preset ]] && p="$v"
+  done < <("mrm_scope_${id}_get_state" 2>/dev/null)
+  printf '%s' "$p"
+}
+
+mrm_ls_cmd() {
+  local scopes_csv=$1
+  local verbose=${2:-0}
+  mrm_require_yq || exit 1
+  mrm_active_scopes_fill "$scopes_csv"
+  echo "Groups:"
+  printf '  %-18s  %s\n' "chinese-group" "China-reachable aggregate (see share/profiles/groups.yaml)"
+  printf '  %-18s  %s\n' "official-group" "Upstream / default presets"
+  echo ""
+  echo "Presets ( * = current inferred ):"
+  local id cur star pid summ hint
+  for id in "${MRM_ACTIVE_SCOPES[@]}"; do
+    echo ""
+    echo "[${id}]"
+    cur=$(mrm_get_current_preset "$id")
+    mrm_source_scope "$id"
+    while IFS=$'\t' read -r pid summ hint; do
+      [[ -z "$pid" ]] && continue
+      star=" "
+      [[ -n "$cur" && "$cur" == "$pid" ]] && star="*"
+      printf '  %s  %-16s  %-40s  %s\n' "$star" "$pid" "${summ:--}" "${hint:--}"
+      if [[ "$verbose" -eq 1 ]]; then
+        mrm_ls_print_verbose_preset_details "$id" "$pid"
+      fi
+    done < <("mrm_scope_${id}_list_presets")
+  done
+}
+
+mrm_test_cmd() {
+  local target=$1 scopes_csv=$2
+  mrm_require_yq || exit 1
+  local sig_fail=0 any=0 r scope preset p id pid ok cur eff_csv
+
+  if [[ -z "${target:-}" ]]; then
+    mrm_active_scopes_fill "$scopes_csv"
+    for id in "${MRM_ACTIVE_SCOPES[@]}"; do
+      mrm_source_scope "$id"
+      cur=$(mrm_get_current_preset "$id")
+      if [[ -z "$cur" ]]; then
+        echo "mrm: [${id}] skip test: no inferred preset (state unknown or mixed)" >&2
+        continue
+      fi
+      any=1
+      set +e
+      "mrm_scope_${id}_test_preset" "$cur"
+      r=$?
+      set -e
+      [[ "$r" -ne 0 && "$cur" != "official" ]] && sig_fail=$((sig_fail + 1))
+    done
+    [[ "$any" -eq 0 ]] && exit 0
+    [[ "$sig_fail" -gt 0 ]] && exit 1
+    exit 0
+  fi
+
+  if [[ "$target" == */* ]]; then
+    scope=${target%%/*}
+    preset=${target#*/}
+    ok=0
+    while IFS= read -r rid; do
+      [[ "$rid" == "$scope" ]] && ok=1
+    done < <(mrm_registry_list)
+    if [[ "$ok" -ne 1 ]]; then
+      echo "mrm: unknown scope: ${scope}" >&2
+      exit 1
+    fi
+    mrm_preset_has "$scope" "$preset" || {
+      echo "mrm: unknown preset: ${scope}/${preset}" >&2
+      exit 1
+    }
+    mrm_source_scope "$scope"
+    set +e
+    "mrm_scope_${scope}_test_preset" "$preset"
+    r=$?
+    set -e
+    [[ "$preset" == "official" ]] && exit 0
+    exit "$r"
+  fi
+
+  if mrm_group_exists "$target"; then
+    eff_csv=$(mrm_group_scope_ids_ordered_csv "$target") || exit 1
+    if [[ -n "${scopes_csv// /}" ]]; then
+      eff_csv=$(mrm_csv_intersect_scopes "$eff_csv" "$scopes_csv") || exit 1
+    fi
+    mrm_active_scopes_fill "$eff_csv"
+    for id in "${MRM_ACTIVE_SCOPES[@]}"; do
+      mrm_source_scope "$id"
+      cur=$(mrm_get_current_preset "$id")
+      if [[ -z "$cur" ]]; then
+        echo "mrm: [${id}] skip test: no inferred preset (state unknown or mixed)" >&2
+        continue
+      fi
+      any=1
+      set +e
+      "mrm_scope_${id}_test_preset" "$cur"
+      r=$?
+      set -e
+      [[ "$r" -ne 0 && "$cur" != "official" ]] && sig_fail=$((sig_fail + 1))
+    done
+    [[ "$any" -eq 0 ]] && exit 0
+    [[ "$sig_fail" -gt 0 ]] && exit 1
+    exit 0
+  fi
+
+  ok=0
+  while IFS= read -r rid; do
+    [[ "$rid" == "$target" ]] && ok=1
+  done < <(mrm_registry_list)
+  if [[ "$ok" -eq 1 ]]; then
+    mrm_source_scope "$target"
+    cur=$(mrm_get_current_preset "$target")
+    if [[ -z "$cur" ]]; then
+      echo "mrm: [${target}] skip test: no inferred preset (state unknown or mixed)" >&2
+      exit 0
+    fi
+    any=1
+    set +e
+    "mrm_scope_${target}_test_preset" "$cur"
+    r=$?
+    set -e
+    [[ "$r" -ne 0 && "$cur" != "official" ]] && sig_fail=$((sig_fail + 1))
+    [[ "$sig_fail" -gt 0 ]] && exit 1
+    exit 0
+  fi
+
+  echo "mrm: test unknown target (group / scope / scope/preset): ${target}" >&2
+  exit 1
+}
+
+main() {
+  [[ $# -eq 0 ]] && {
+    mrm_help
+    exit 1
+  }
+
+  if [[ "$1" == "--help" ]]; then
+    mrm_help
+    exit 0
+  fi
+
+  if [[ "$1" == "--list-scopes" ]]; then
+    mrm_list_scopes_cmd
+    exit 0
+  fi
+
+  local args=()
+  local a
+  MRM_LS_VERBOSE=0
+  MRM_EXPORT_SHELL_ENV="${MRM_EXPORT_SHELL_ENV:-0}"
+  for a in "$@"; do
+    if [[ "$a" == --scopes=* ]]; then
+      MRM_SCOPES_CSV="${a#--scopes=}"
+    elif [[ "$a" == "--verbose" || "$a" == "-v" ]]; then
+      MRM_LS_VERBOSE=1
+    elif [[ "$a" == "--export-shell-env" ]]; then
+      MRM_EXPORT_SHELL_ENV=1
+    else
+      args+=("$a")
+    fi
+  done
+  set -- "${args[@]}"
+
+  local verb=${1:-}
+  [[ -n "$verb" ]] || {
+    mrm_help
+    exit 1
+  }
+  shift
+
+  case "$verb" in
+    use)
+      mrm_use_cmd "${1:-}" "${MRM_SCOPES_CSV:-}"
+      ;;
+    current)
+      mrm_current_cmd "${MRM_SCOPES_CSV:-}" "${1:-}"
+      ;;
+    ls)
+      mrm_ls_cmd "${MRM_SCOPES_CSV:-}" "${MRM_LS_VERBOSE:-0}"
+      ;;
+    test)
+      mrm_test_cmd "${1:-}" "${MRM_SCOPES_CSV:-}"
+      ;;
+    shell-env)
+      mrm_shell_env_cmd "${MRM_SCOPES_CSV:-}"
+      ;;
+    *)
+      echo "mrm: unknown verb: ${verb} (use / current / ls / test / shell-env / --list-scopes; see mrm --help)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

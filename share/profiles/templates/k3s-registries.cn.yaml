@@ -1,0 +1,22 @@
+# mrm built-in: matches chinese-group / k3s chinese preset; edit freely; mrm can still install it
+mirrors:
+  "docker.io":
+    endpoint:
+      - "https://docker.m.daocloud.io"
+      - "https://docker.1ms.run"
+      - "https://hub-mirror.c.163.com"
+  # containerd resolves Hub pulls to this host; without a mirror entry, pulls bypass CN endpoints.
+  "registry-1.docker.io":
+    endpoint:
+      - "https://docker.m.daocloud.io"
+      - "https://docker.1ms.run"
+      - "https://hub-mirror.c.163.com"
+  "gcr.io":
+    endpoint:
+      - "https://gcr.m.daocloud.io"
+  "ghcr.io":
+    endpoint:
+      - "https://ghcr.m.daocloud.io"
+  "quay.io":
+    endpoint:
+      - "https://quay.m.daocloud.io"

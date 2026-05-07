@@ -1,0 +1,10 @@
+chinese:
+  insteadOf: "https://github.com/"
+  insteadWith: "https://ghproxy.link/https://github.com/"
+  summary: "GitHub HTTPS via ghproxy.link prefix"
+  probe: "https://ghproxy.link"
+
+official:
+  clear: true
+  summary: "Direct GitHub HTTPS (clear mrm insteadOf)"
+  probe: "https://github.com"

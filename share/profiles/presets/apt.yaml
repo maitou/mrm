@@ -1,0 +1,11 @@
+chinese:
+  ubuntu_uri: "http://mirrors.aliyun.com/ubuntu"
+  debian_uri: "http://mirrors.aliyun.com/debian"
+  summary: "Aliyun mirrors (Ubuntu/Debian deb822)"
+  probe: "http://mirrors.aliyun.com"
+
+official:
+  ubuntu_uri: "http://archive.ubuntu.com/ubuntu"
+  debian_uri: "http://deb.debian.org/debian"
+  summary: "Official archive.ubuntu.com / deb.debian.org"
+  probe: "http://archive.ubuntu.com"
