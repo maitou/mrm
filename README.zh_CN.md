@@ -4,9 +4,11 @@
 
 ## 概述
 
-日常开发往往同时用到包管理器、容器、语言工具链与 Git 等；镜像与上游分散在各处，切换「国内可达」与「恢复默认」时容易重复改文件、难统一、也难回滚。**mrm** 面向**本机**这些配置的集中切换：用组合名一键套用多栈，或只改某一栈，而**不**动你的业务代码仓库。
+**mrm** 是面向 Linux 的多环境镜像/源（registry）管理工具。
 
-命令风格类似 **nrm** / **yrm**（如 `use`、`current`）。效果上，你可以用预设组合快速对齐国内网络环境，或在需要时回到更贴近上游的默认组合；具体改哪些路径、是否需要 root，见下文 [作用域](#作用域)。
+它让开发者在 **apt**、**Docker**、**k3s**、**Git**、**Go** 等开发环境之间，通过可复用的 **YAML 预设组合**切换和管理镜像、源与上游设置，而无需手动编辑分散在各处的配置文件。
+
+风格借鉴 **nrm**、**yrm** 等工具，**mrm** 用 `use`、`current`、`ls` 等命令提供简单、一致的环境切换体验；具体改哪些路径、是否需要 root，见下文 [作用域](#作用域)。
 
 ## 安装
 
@@ -17,13 +19,13 @@
 - **[jq](https://jqlang.github.io/jq/)** — **docker** 作用域必需（合并 `daemon.json`）。
 - 写入系统路径的作用域需要 **sudo**：**apt**、**docker**、**k3s**。
 
-### 安装方式
-
 安装脚本会按需安装 **yq**、**jq**、**curl** 等依赖，默认安装到 **`$HOME/.local`**（一般无需 root）。
 
-#### 一键安装
+### 一键安装
 
 克隆仓库并执行 **install.sh**（在任意目录执行即可）。
+
+若安装环境**无法使用 Git**（或无法 `git clone`），可先在本机或能访问 GitHub 的环境下载源码包（例如仓库页的 **Code → Download ZIP**），将压缩包传到目标机并解压，在解压后的目录根目录（与 **install.sh**、`bin/` 同级）执行 **`bash install.sh`**，参数与下文一致。
 
 **用户级**（安装到当前用户目录，默认 **`$HOME/.local`**，无需 root）：
 
@@ -47,34 +49,6 @@ git clone https://github.com/maitou/mrm.git && cd mrm && sudo bash install.sh --
 ```bash
 # 国内（加上 --download-source=cn）
 git clone https://github.com/maitou/mrm.git && cd mrm && sudo bash install.sh --prefix=/usr/local --download-source=cn
-```
-
-#### 自动安装
-
-本地**已有**本仓库时，在仓库根目录（与 **install.sh**、`bin/` 同级）执行 **`bash install.sh`**，由脚本自动补齐依赖。
-
-**用户级**：
-
-```bash
-# 默认
-cd /path/to/mrm && bash install.sh
-```
-
-```bash
-# 国内
-cd /path/to/mrm && bash install.sh --download-source=cn
-```
-
-**系统级**：
-
-```bash
-# 默认
-cd /path/to/mrm && sudo bash install.sh --prefix=/usr/local
-```
-
-```bash
-# 国内
-cd /path/to/mrm && sudo bash install.sh --prefix=/usr/local --download-source=cn
 ```
 
 安装完成后若使用默认前缀，请确保 **`$HOME/.local/bin`** 在 **`PATH`** 中（例如 `export PATH="$HOME/.local/bin:$PATH"`），再执行 **`mrm --help`**。

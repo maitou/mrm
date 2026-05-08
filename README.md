@@ -4,9 +4,11 @@
 
 ## Overview
 
-Developers routinely use package managers, containers, language toolchains, and Git together; mirror and upstream settings are scattered, and switching between a **China-reachable** setup and **reverting to defaults** is repetitive and hard to keep consistent. **mrm** switches these **local** host settings in one place: apply a named **group** across stacks, or change a single stack, **without** touching your application repository.
+**mrm** is a multi-environment registry manager for Linux.
 
-The command style is similar to **nrm** / **yrm** (e.g. `use`, `current`). You can align with domestic network conditions using built-in **groups**, or move back toward upstream-oriented defaults; which paths are edited and whether **root** is needed are summarized under [Scopes](#scopes) below.
+It lets developers switch and manage registries, mirrors, and upstream settings across apt, Docker, k3s, Git, Go, and other development environments using reusable YAML preset groups — without manually editing scattered configs.
+
+Inspired by tools like **nrm** and **yrm**, **mrm** provides simple and consistent environment switching with commands such as `use`, `current`, and `ls`. Which paths are edited and whether **root** is needed are summarized under [Scopes](#scopes) below.
 
 ## Install
 
@@ -17,13 +19,13 @@ The command style is similar to **nrm** / **yrm** (e.g. `use`, `current`). You c
 - **[jq](https://jqlang.github.io/jq/)** — required for the **docker** scope (merge `daemon.json`).
 - **sudo** for scopes that write system paths: **apt**, **docker**, **k3s**.
 
-### Install methods
-
 The installer pulls in **yq**, **jq**, and **curl** as needed. Default install prefix is **`$HOME/.local`** (usually no root).
 
-#### One-shot install
+### One-shot install
 
 Clone the repository and run **install.sh** (from any directory).
+
+If **Git is unavailable** on the install machine (or `git clone` is blocked), download a source snapshot instead — for example **Code → Download ZIP** on the GitHub repository page — unpack it, `cd` into the extracted folder (next to **install.sh** and `bin/`), and run **`bash install.sh`** with the same flags as below.
 
 **User-level** (install under the current user, default **`$HOME/.local`**, no root):
 
@@ -47,34 +49,6 @@ git clone https://github.com/maitou/mrm.git && cd mrm && sudo bash install.sh --
 ```bash
 # Mainland China (add --download-source=cn)
 git clone https://github.com/maitou/mrm.git && cd mrm && sudo bash install.sh --prefix=/usr/local --download-source=cn
-```
-
-#### Already have the repo
-
-If you already have a local copy, run **`bash install.sh`** at the repository root (alongside **install.sh** and `bin/`). The script installs missing dependencies automatically.
-
-**User-level**:
-
-```bash
-# Default
-cd /path/to/mrm && bash install.sh
-```
-
-```bash
-# Mainland China
-cd /path/to/mrm && bash install.sh --download-source=cn
-```
-
-**System-wide**:
-
-```bash
-# Default
-cd /path/to/mrm && sudo bash install.sh --prefix=/usr/local
-```
-
-```bash
-# Mainland China
-cd /path/to/mrm && sudo bash install.sh --prefix=/usr/local --download-source=cn
 ```
 
 If you used the default prefix, ensure **`$HOME/.local/bin`** is on **`PATH`** (e.g. `export PATH="$HOME/.local/bin:$PATH"`), then run **`mrm --help`**.
