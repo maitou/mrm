@@ -1,4 +1,4 @@
-# mrm — Mirror Registry Manager
+# mrm — Multi Registry Manager
 
 **English** | [中文](README.zh_CN.md)
 
